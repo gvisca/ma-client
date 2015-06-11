@@ -98,8 +98,8 @@ var handle = Meteortics_Local_Collection.find().observe({
         console.log('local observe: Settings inserted, Start Logging ...', doc)
             // handle.stop();
 
-        if (doc.log_enabled && !logInstalled) startup_log();
-        if (doc.health_enabled && !healthInstalled) startup_health();
+        if (doc.log_enabled==='on' && !logInstalled) startup_log();
+        if (doc.health_enabled==='on' && !healthInstalled) startup_health();
 
         send_server_info()
     }
@@ -158,10 +158,10 @@ var startup_log = function() {
 
 
 
-// Init Logginf functionnality
+// Init health functionnality
 var startup_health = function() {
     console.log('Installing Health')
-    healthCheck = Meteor.setInterval(function() {
+    Meteor.setInterval(function() {
         var os = Npm.require('os');
         send_event('health', {
             cpus: os.cpus(),
@@ -248,7 +248,7 @@ Meteor.methods({
 
 
 
-// Publishto clients
+// Publish to clients
 Meteor.publish("_meteortics", function(clientParams) {
     console.log('Publishing _meteortics')
     var sessionId = Random.id()
@@ -266,7 +266,7 @@ Meteor.publish("_meteortics", function(clientParams) {
         },
         self = this;
     if (this.userId) params.user = getSafeUserProfile(this.userId);
-
+    console.log('client_connexion',params)
     send_event('client_connexion', params);
 
     var onclose = Meteor.bindEnvironment(function() {

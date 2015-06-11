@@ -1,3 +1,5 @@
+/// <reference path="../../../typings/meteor/meteor.d.ts" />
+
 var event_triggers = []
 var booted = new Date().getTime()
 
