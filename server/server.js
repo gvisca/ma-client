@@ -6,38 +6,42 @@ var meteortics_version = '0.0.1',
     applicationId = null,
     logInstalled = false,
     healthInstalled = false,
+    healthIntervalId = null,
     serverId = Random.id(),
-    maxRetries = 10,
+    // maxRetries = 10,
     Meteortics_Local_Collection = new Mongo.Collection("meteortics_settings"),
-    Meteortics_Remote_Server = DDP.connect(process.env.METEORTICS_URL || default_server),
-    Meteortics_Remote_Collection = new Mongo.Collection("server_auth", {
+    Meteortics_Remote_Server = DDP.connect(process.env.METEORTICS_URL || default_server),//We could pass METEORTICS_URL by meteor settings ?
+    Meteortics_Remote_Collection = new Mongo.Collection("ma_server_auth", {
         connection: Meteortics_Remote_Server
     })
 
-/**********************************************************
+/*****************************************
  *
  * Application server startup and logging
  *
- **********************************************************/
-
-//Removing all documents on startup
-Meteortics_Local_Collection.remove({})
+ *****************************************/
 
 
+/*
+ *
+ * Generic function sending informations to remote server
+ *
+ */
+var send_event = function(params) {
+    // add context informations
+    params.appId = applicationId
+    params.serverId = serverId
 
-// Function sending informations to remote server
-var send_event = function(type, params) {
-    if (type != 'log')
-        console.log('sending event type', type)
-    params.appId = applicationId;
-    params.serverId = serverId;
-    params.type = type;
     Meteortics_Remote_Server.call("Meteortics_Event", params, function() {});
 }
 
 
 
-// Helper function to install hook on stdout
+/*
+ *
+ * Helper function to install hook on stdout
+ *
+ */
 var install_hook_to = function(obj) {
     if (obj.hook || obj.unhook)
         throw new Error('Object already has properties hook and/or unhook');
@@ -92,22 +96,103 @@ var install_hook_to = function(obj) {
 
 
 
-// Listen for local collection settings to start logging
-var handle = Meteortics_Local_Collection.find().observe({
-    added: function(doc) {
-        console.log('local observe: Settings inserted, Start Logging ...', doc)
-            // handle.stop();
+/*
+ *
+ * Install Logging functionality
+ *
+ */
+var startup_log = function() {
+    // Install hook to stdout
+    console.log('Installing Hook on stdout')
+    var stdout = process.stdout
+    if (!stdout.hook) install_hook_to(stdout)
 
-        if (doc.log_enabled==='on' && !logInstalled) startup_log();
-        if (doc.health_enabled==='on' && !healthInstalled) startup_health();
+    stdout.hook('write', function(string, encoding, fd, write) {
+        write(string);
+        Npm.require('fibers')(function() {
+            send_event('log', {
+                text: string.length > 1000 ? string.substr(0, 1000) + ". . . [truncated]" : string
+            });
+        }).run();
+    });
 
-        send_server_info()
-    }
-});
+    var stderr = process.stderr
+    if (!stderr.hook) install_hook_to(stderr)
+
+    stderr.hook('write', function(string, encoding, fd, write) {
+        write(string);
+        Npm.require('fibers')(function() {
+            send_event('error', {
+                text: string.length > 1000 ? string.substr(0, 1000) + ". . . [truncated]" : string
+            });
+        }).run();
+    });
+
+    logInstalled = true
+    console.log('Hook on stdout installed')
+}
+
+/*
+ *
+ * Uninstall Logging functionality
+ *
+ */
+var stop_log = function() {
+    var stdout = process.stdout;
+    stdout.unhook('write')
+    var stderr = process.stderr;
+    stderr.unhook('write')
+    logInstalled = false;
+    console.log('Hook on stdout uninstalled')
+}
 
 
 
-// Send server informations
+/*
+ *
+ * Install Health functionality
+ *
+ */
+var startup_health = function() {
+    console.log('Installing Health')
+    healthIntervalId = Meteor.setInterval(function() {
+        var os = Npm.require('os');
+        console.log('Sending Health', new Date())
+        send_event('health', {
+            cpus: os.cpus(),
+            loadavg: os.loadavg(),
+            uptime: os.uptime(),
+            freemem: os.freemem(),
+            usedmemory: (os.totalmem() - os.freemem()),
+            processMem: process.memoryUsage().rss
+        });
+    }, 30000);
+    //TODO get the interval from remote server
+    healthInstalled = true
+    console.log('Health installed')
+}
+
+/*
+ *
+ * Uninstall Health functionality
+ *
+ */
+var stop_health = function() {
+    Meteor.clearInterval(healthIntervalId)
+    healthInstalled = false
+    console.log('Health Uninstalled')
+}
+
+
+
+
+
+
+/*
+ *
+ * Send server informations
+ *
+ */
 var send_server_info = function() {
     var os = Npm.require('os');
     var infos = {
@@ -137,78 +222,81 @@ var send_server_info = function() {
 
 
 
-// Init Logging functionnality
-var startup_log = function() {
-    // Install hook to stdout
-    console.log('Installing Hook on stdout')
-    var stdout = process.stdout;
-    install_hook_to(stdout);
+/*
+ *
+ * Listen for local collection settings to start logging
+ *
+ */
+// var handle = Meteortics_Local_Collection.find().observe({
+//     added: function(doc) {
+//         console.log('local observe: Settings inserted, Start Logging ...', doc)
+//             // handle.stop();
 
-    stdout.hook('write', function(string, encoding, fd, write) {
-        write(string);
-        Npm.require('fibers')(function() {
-            send_event('log', {
-                text: string.length > 1000 ? string.substr(0, 1000) + ". . . [truncated]" : string
-            });
-        }).run();
-    });
-    logInstalled = true;
-    console.log('Hook on stdout installed')
-}
+//         if (doc.log_enabled === 'on' && !logInstalled) startup_log();
+//         if (doc.health_enabled === 'on' && !healthInstalled) startup_health();
 
+//         send_server_info()
+//     },
+//     changed: function(doc) {
 
-
-// Init health functionnality
-var startup_health = function() {
-    console.log('Installing Health')
-    Meteor.setInterval(function() {
-        var os = Npm.require('os');
-        send_event('health', {
-            cpus: os.cpus(),
-            loadavg: os.loadavg(),
-            uptime: os.uptime(),
-            freemem: os.freemem(),
-            usedmemory: (os.totalmem() - os.freemem()),
-            processMem: process.memoryUsage().rss
-        });
-    }, 300000);
-    healthInstalled = true
-    console.log('Health installed')
-}
+//     }
+// });
 
 
 
-// Login Remote Server
+/*
+ *
+ * Login with Remote server
+ *
+ */
 var auth = function(params) {
     console.log('auth:Starting Authentication ...')
-    var appId = (params && params.appId) || (Meteor.settings && Meteor.settings.meteortics && Meteor.settings.meteortics.appId)
-    var secret = (params && params.secret) || (Meteor.settings && Meteor.settings.meteortics && Meteor.settings.meteortics.secret)
-    if (!appId) {
-        return 
-    }
-    // We subscribe to remote collection
-    Meteortics_Remote_Server.subscribe('server_auth', {
-        appId: appId,
-        secret: secret,
-        serverId:serverId
+    check(params, {
+            appId: String,
+            secret: String
+        })
+        // var appId = (params && params.appId) || (Meteor.settings && Meteor.settings.meteortics && Meteor.settings.meteortics.appId)
+        // var secret = (params && params.secret) || (Meteor.settings && Meteor.settings.meteortics && Meteor.settings.meteortics.secret)
+        // if (!appId) {
+        //     return 
+        // }
+        // Subscribe to remote collection
+    Meteortics_Remote_Server.subscribe('ma_server_auth', {
+        appId: params.appId,
+        secret: params.secret,
+        serverId: serverId
     });
-    console.log('auth:Subscribed to server_auth',appId,secret)
+    console.log('auth:Subscribed to server_auth', params.appId, params.secret)
 
-    // We start observing remote collection change to get default settings
+    // Start observing remote collection change to get default settings
     var connect = function() {
         Meteortics_Remote_Collection.find({
-            appId: Meteor.settings.meteortics.appId
+            appId: params.appId
         }).observe({
             added: function(doc) {
                 console.log('auth:received information from remote server', {
-                    doc: doc
-                })
-                if (doc.secret == Meteor.settings.meteortics.secret) {
-                    applicationId = Meteor.settings.meteortics.appId
-                    Meteortics_Local_Collection.insert(_.omit(doc, '_id'), function() {
-                        console.log('settings inserted into local collection')
+                        doc: doc
                     })
-                }
+                    // if (doc.secret == params.secret) {
+                applicationId = params.appId
+                    // Meteortics_Local_Collection.insert(_.omit(doc, '_id'), function() {
+                    //     console.log('settings inserted into local collection')
+                    // })
+                if (doc.log_enabled === 'on' && !logInstalled) startup_log();
+                if (doc.health_enabled === 'on' && !healthInstalled) startup_health();
+
+                send_server_info()
+                    // }
+            },
+            changed: function(newDocument, oldDocument) {
+                console.log('auth_changed:received information from remote server', newDocument, oldDocument)
+                if (newDocument.log_enabled === 'on' && !logInstalled) startup_log();
+                if (newDocument.log_enabled === 'off' && logInstalled) stop_log();
+                if (newDocument.health_enabled === 'on' && !healthInstalled) startup_health();
+                if (newDocument.health_enabled === 'off' && healthInstalled) stop_health();
+            },
+            removed: function() {
+                console.warn('_Meteortic auth:removed not implemented')
             }
 
         });
@@ -221,15 +309,40 @@ var auth = function(params) {
 }
 
 
-// Start authentication
+/*
+ *
+ * Start authentication if params sent by Meteor.settings
+ *
+ */
 Meteor.startup(function() {
-    var intervalId, retries = 0
-    intervalId = Meteor.setInterval(function() {
-        ++retries
-        if (retries > maxRetries || auth())
-            Meteor.clearInterval(intervalId)
-    }, 2000)
+    console.log('Meteor.settings', Meteor.settings)
+    if (Meteor.settings && Meteor.settings.meteortics)
+        auth(Meteor.settings.meteortics)
+        // var intervalId, retries = 0
+        // intervalId = Meteor.setInterval(function() {
+        //     ++retries
+        //     if (retries > maxRetries || auth())
+        //         Meteor.clearInterval(intervalId)
+        // }, 2000)
 })
+
+/*
+ *
+ * Public method to connect to remote server
+ *
+ */
+Meteortics = {
+    connect: function(params) {
+        auth(params)
+    }
+}
+
+
+
+
+
+
+
 
 
 
@@ -242,7 +355,7 @@ Meteor.startup(function() {
 // Listening to clientside events
 Meteor.methods({
     '_Mevent': function(params) {
-        send_event(params.type, params);
+        send_event(params);
     }
 });
 
@@ -251,7 +364,6 @@ Meteor.methods({
 // Publish to clients
 Meteor.publish("_meteortics", function(clientParams) {
     console.log('Publishing _meteortics')
-    var sessionId = Random.id()
     var params = {
             ip: this._session.socket.remoteAddress,
             headers: this._session.socket.headers,
@@ -262,11 +374,13 @@ Meteor.publish("_meteortics", function(clientParams) {
             referrer: clientParams.referrer,
             resolution: clientParams.resolution,
             uid: clientParams.uid,
-            sessionId:sessionId
+            sessionId: clientParams.sessionId
         },
         self = this;
-    if (this.userId) params.user = getSafeUserProfile(this.userId);
-    console.log('client_connexion',params)
+    if (this.userId) {
+        params.user = getSafeUserProfile(this.userId);
+    }
+    console.log('client_connexion', params)
     send_event('client_connexion', params);
 
     var onclose = Meteor.bindEnvironment(function() {
@@ -274,7 +388,7 @@ Meteor.publish("_meteortics", function(clientParams) {
         send_event('client_deconnexion', {
             count: _.size(self._session.server.sessions),
             userId: clientParams.uid,
-            sessionId: sessionId
+            sessionId: clientParams.sessionId
         })
     }, function() {});
 
@@ -284,3 +398,4 @@ Meteor.publish("_meteortics", function(clientParams) {
 
     this.ready();
 });
+
